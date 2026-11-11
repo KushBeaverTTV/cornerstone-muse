@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "cornerstone.muse",
+  "name": "Cornerstone Muse",
+  "version": "1.0.0",
+  "author": "Kush Beaver Productionz",
+  "license": "MIT",
+  "description": "Meta Muse Agent in the bar: weekly quota and additional-token bars, and open, hide or close the one Muse window.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Cornerstone Muse",
+    "description": "Muse quota bars and open / close.",
+    "category": "Apps",
+    "aliases": [
+      "muse",
+      "meta-muse"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {}
+  }
+}
