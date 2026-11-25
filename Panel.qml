@@ -1,99 +1,73 @@
 import QtQuick
-import Quickshell
-import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "Muse.js" as Muse
 
-// Meta Muse Agent in the bar. Left click: panel. Right click: open / bring
-// Muse here. Middle click: hide it. Numbers come from ~/.local/bin/muse-ctl,
-// which reads what the "Muse Usage for Omarchy" Chrome add-on saved.
+// Meta Muse Agent in the bar. Built once per monitor; FileView watcher,
+// window checks, actions and IPC live in Service.qml.
+// Left click: panel. Right click: open / bring Muse here. Middle click: hide.
 Panel {
   id: root
   moduleName: "muse"
   ipcTarget: "muse"
   manageIpc: false
 
+  readonly property var service: bar && bar.shell ? bar.shell.serviceFor("cornerstone.muse") : null
   readonly property string iconPath: Qt.resolvedUrl("assets/muse.png")
-  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color muted: Qt.darker(foreground, 1.55)
   readonly property color hairline: Qt.darker(foreground, 2.4)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color museBlue: "#1F6BFF"
   readonly property color museLight: "#5AA2FF"
   readonly property color warnColor: "#FFB020"
-  readonly property color badColor: "#ED4245"
+  readonly property color badColor: Color.urgent
 
-  property int openCount: 0
-  property real weeklyPct: -1      // percent of the weekly allowance used
-  property string resetText: ""
-  property string plan: ""
-  property real extraTokens: -1
-  property real extraPeak: 0
-  property int updated: 0
-  property real nowSec: Date.now() / 1000
-
-  readonly property bool isOpen: openCount > 0
-  readonly property bool hasWeekly: weeklyPct >= 0
-  readonly property bool hasExtra: extraTokens >= 0
-  readonly property real weeklyAllowance: plan === "Maximum" ? 3e9 : plan === "Power" ? 5e8 : 0
+  readonly property bool isOpen: service ? service.isOpen : false
+  readonly property bool hasWeekly: service ? service.hasWeekly : false
+  readonly property bool hasExtra: service ? service.hasExtra : false
+  readonly property real weeklyPct: service ? service.weeklyPct : -1
+  readonly property string resetText: service ? service.resetText : ""
+  readonly property string plan: service ? service.plan : ""
+  readonly property real extraTokens: service ? service.extraTokens : -1
+  readonly property real extraPeak: service ? service.extraPeak : 0
+  readonly property int updated: service ? service.updated : 0
+  readonly property real nowSec: service ? service.nowSec : Date.now() / 1000
+  readonly property real weeklyAllowance: service ? service.weeklyAllowance : 0
   readonly property color weeklyColor: weeklyPct >= 90 ? badColor : weeklyPct >= 70 ? warnColor : museBlue
 
-  function fmtTokens(v) {
-    if (v < 0) return "–"
-    if (v >= 1e12) return (v / 1e12).toFixed(1) + "T"
-    if (v >= 1e9) return (v / 1e9).toFixed(v >= 1e10 ? 0 : 1) + "B"
-    if (v >= 1e6) return (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + "M"
-    if (v >= 1e3) return (v / 1e3).toFixed(0) + "K"
-    return String(Math.round(v))
-  }
-  function ago(sec) {
-    if (sec <= 0) return "never"
-    var d = Math.max(0, Math.round(root.nowSec - sec))
-    if (d < 90) return "just now"
-    if (d < 5400) return Math.round(d / 60) + " min ago"
-    if (d < 129600) return Math.round(d / 3600) + " h ago"
-    return Math.round(d / 86400) + " days ago"
+  readonly property string barTooltip: {
+    var parts = ["Muse"]
+    if (hasWeekly) parts.push(Math.round(weeklyPct) + "% weekly used")
+    else parts.push(isOpen ? "Open" : "Not open")
+    if (hasExtra) parts.push(Muse.fmtTokens(extraTokens) + " extra")
+    return parts.join(" · ")
   }
 
-  Process {
-    id: stateProc
-    command: ["muse-ctl", "state"]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        try {
-          var d = JSON.parse(String(this.text))
-          root.openCount = Math.max(0, Math.min(99, parseInt(d.open) || 0))
-          root.weeklyPct = typeof d.weeklyPct === "number" ? Math.max(0, Math.min(100, d.weeklyPct)) : -1
-          root.resetText = typeof d.resetText === "string" ? d.resetText.slice(0, 48) : ""
-          root.plan = (d.plan === "Free" || d.plan === "Power" || d.plan === "Maximum") ? d.plan : ""
-          root.extraTokens = typeof d.extraTokens === "number" && d.extraTokens >= 0 ? d.extraTokens : -1
-          root.extraPeak = typeof d.extraPeak === "number" ? d.extraPeak : 0
-          root.updated = parseInt(d.updated) || 0
-        } catch (e) {}
-      }
+  readonly property var stops: isOpen
+    ? ["open", "usage", "hide", "close"]
+    : ["open", "usage"]
+
+  property int cursor: -1
+  property bool watching: false
+
+  onOpenedChanged: {
+    cursor = -1
+    if (service) {
+      if (opened && !watching) { watching = true; service.watchers++; service.refreshWindows() }
+      else if (!opened && watching) { watching = false; service.watchers = Math.max(0, service.watchers - 1) }
     }
   }
-  Timer {
-    interval: root.opened ? 1500 : 6000
-    running: true
-    repeat: true
-    triggeredOnStart: true
-    onTriggered: {
-      root.nowSec = Date.now() / 1000
-      if (!stateProc.running) stateProc.running = true
-    }
+  Component.onDestruction: {
+    if (watching && service) service.watchers = Math.max(0, service.watchers - 1)
   }
-  Timer { id: refreshSoon; interval: 600; onTriggered: if (!stateProc.running) stateProc.running = true }
 
-  function ctl(arg) { if (root.bar) root.bar.run("muse-ctl " + arg); refreshSoon.restart() }
-
-  IpcHandler {
-    id: ipc
-    target: root.ipcTarget
-    function toggle(): string { root.toggle(); return root.opened ? "open" : "closed" }
-    function show(): string { root.ctl("open"); return "summoned" }
-    Component.onCompleted: IpcRegistry.register(ipc)
-    Component.onDestruction: IpcRegistry.unregister(ipc)
+  function activateStop(id) {
+    if (!service) return
+    if (id === "open") { service.ctl("open"); root.close() }
+    else if (id === "usage") { service.ctl("usage"); root.close() }
+    else if (id === "hide" && isOpen) service.ctl("hide")
+    else if (id === "close" && isOpen) service.ctl("close")
   }
 
   implicitWidth: button.implicitWidth
@@ -103,10 +77,10 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    tooltipText: ""
+    tooltipText: root.opened ? "" : root.barTooltip
     onPressed: function(code) {
-      if (code === Qt.RightButton) root.ctl("open")
-      else if (code === Qt.MiddleButton) root.ctl("hide")
+      if (code === Qt.RightButton && root.service) root.service.ctl("open")
+      else if (code === Qt.MiddleButton && root.service) root.service.ctl("hide")
       else root.toggle()
     }
     iconComponent: Component {
@@ -210,12 +184,17 @@ Panel {
     property color tint: root.foreground
     property real fill: 0.12
     property bool enabledRow: true
+    property bool focused: false
+    signal hovered()
     signal activated()
     width: parent ? parent.width : 0
     height: Style.space(30)
     radius: Style.space(6)
     opacity: enabledRow ? 1.0 : 0.45
-    color: Qt.rgba(tint.r, tint.g, tint.b, rowArea.containsMouse && enabledRow ? fill + 0.1 : fill)
+    color: Qt.rgba(tint.r, tint.g, tint.b, (rowArea.containsMouse || focused) && enabledRow ? fill + 0.1 : fill)
+    border.width: focused && enabledRow ? 1 : 0
+    border.color: Color.accent
+    Behavior on color { ColorAnimation { duration: Style.duration(120) } }
     Text {
       anchors.verticalCenter: parent.verticalCenter
       anchors.left: parent.left
@@ -234,6 +213,7 @@ Panel {
       hoverEnabled: true
       enabled: row.enabledRow
       cursorShape: Qt.PointingHandCursor
+      onEntered: row.hovered()
       onClicked: row.activated()
     }
   }
@@ -254,9 +234,19 @@ Panel {
       implicitHeight: column.implicitHeight
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onMoveRequested: function(dx, dy) {
+        if (dy === 0 || root.stops.length === 0) return
+        var n = root.stops.length
+        root.cursor = root.cursor < 0 ? (dy > 0 ? 0 : n - 1) : (root.cursor + dy + n) % n
+      }
+      onActivateRequested: {
+        if (root.cursor >= 0 && root.cursor < root.stops.length)
+          root.activateStop(root.stops[root.cursor])
+      }
       onTextKey: function(t) {
-        if (t === "o" || t === "O") { root.ctl("open"); root.close() }
-        else if (t === "r" || t === "R") { root.ctl("usage"); root.close() }
+        if (!root.service) return
+        if (t === "o" || t === "O") { root.service.ctl("open"); root.close() }
+        else if (t === "r" || t === "R") { root.service.ctl("usage"); root.close() }
       }
       clip: true
 
@@ -273,6 +263,7 @@ Panel {
             sourceSize.width: 72; sourceSize.height: 72
             fillMode: Image.PreserveAspectFit
             smooth: true
+            mipmap: true
             anchors.verticalCenter: parent.verticalCenter
           }
           Column {
@@ -288,7 +279,7 @@ Panel {
             }
             Text {
               textFormat: Text.PlainText
-              text: (root.isOpen ? "Open" : "Not open") + " · numbers " + root.ago(root.updated)
+              text: (root.isOpen ? "Open" : "Not open") + " · numbers " + Muse.ago(root.updated, root.nowSec)
               color: root.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -302,7 +293,7 @@ Panel {
           fraction: root.weeklyPct / 100
           barColor: root.weeklyColor
           valueText: Math.round(root.weeklyPct) + "% used"
-                     + (root.weeklyAllowance > 0 ? " of " + root.fmtTokens(root.weeklyAllowance) : "")
+                     + (root.weeklyAllowance > 0 ? " of " + Muse.fmtTokens(root.weeklyAllowance) : "")
           subText: root.hasWeekly
                    ? (root.resetText.length > 0 ? "Resets " + root.resetText : "")
                    : (root.updated > 0 ? "Open Muse settings once (button below) to fill this in" : "Needs the Muse Usage add-on in Chrome: chrome://extensions, Developer mode, Load unpacked, ~/.local/share/muse-agent/usage-extension")
@@ -313,9 +304,9 @@ Panel {
           known: root.hasExtra
           fraction: root.extraPeak > 0 ? root.extraTokens / root.extraPeak : 1
           barColor: root.museLight
-          valueText: root.fmtTokens(root.extraTokens) + " left"
+          valueText: Muse.fmtTokens(root.extraTokens) + " left"
           subText: root.hasExtra
-                   ? (root.extraPeak > root.extraTokens ? "Was " + root.fmtTokens(root.extraPeak) + " · no expiry" : "Separate from the weekly quota · no expiry")
+                   ? (root.extraPeak > root.extraTokens ? "Was " + Muse.fmtTokens(root.extraPeak) + " · no expiry" : "Separate from the weekly quota · no expiry")
                    : ""
         }
 
@@ -328,21 +319,29 @@ Panel {
             label: root.isOpen ? "Bring Muse here" : "Open Muse"
             tint: root.museBlue
             fill: 0.35
-            onActivated: { root.ctl("open"); root.close() }
+            focused: root.cursor === 0
+            onHovered: root.cursor = 0
+            onActivated: root.activateStop("open")
           }
           ActionRow {
             label: "Refresh numbers (opens Muse settings)"
-            onActivated: { root.ctl("usage"); root.close() }
+            focused: root.cursor === 1
+            onHovered: root.cursor = 1
+            onActivated: root.activateStop("usage")
           }
           ActionRow {
             label: "Hide Muse"
             enabledRow: root.isOpen
-            onActivated: root.ctl("hide")
+            focused: root.cursor === 2
+            onHovered: if (root.isOpen) root.cursor = 2
+            onActivated: root.activateStop("hide")
           }
           ActionRow {
             label: "Close Muse"
             enabledRow: root.isOpen
-            onActivated: root.ctl("close")
+            focused: root.cursor === 3
+            onHovered: if (root.isOpen) root.cursor = 3
+            onActivated: root.activateStop("close")
           }
         }
 
@@ -350,7 +349,7 @@ Panel {
           width: parent.width
           textFormat: Text.PlainText
           wrapMode: Text.WordWrap
-          text: "Right-click icon = open · middle-click = hide · o open · r refresh"
+          text: "Right-click = open · middle-click = hide · j/k + Enter navigate · o open · r refresh"
           color: root.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
